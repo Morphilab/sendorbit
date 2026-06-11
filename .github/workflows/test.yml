@@ -1,0 +1,45 @@
+name: sendorbit - Tests and Code Quality
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  shellcheck:
+    name: ShellCheck + Bash Syntax
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Verify Bash syntax (bash -n)
+        run: |
+          echo "Checking syntax of all scripts (excluding tests)..."
+          find . -name "*.sh" -type f -not -path "./tests/*" -exec bash -n {} \;
+          echo "All scripts have valid syntax"
+
+      - name: Install bats
+        run: sudo apt-get install -y bats
+
+      - name: Run unit tests (bats)
+        run: |
+          echo "Running unit tests..."
+          bats tests/validation_test.sh
+          bats tests/security_test.sh
+          bats tests/logging_test.sh
+          bats tests/modules_test.sh
+
+      - name: Run ShellCheck (quality standard)
+        run: |
+          echo "Running ShellCheck on all scripts..."
+          shellcheck --severity=warning \
+            sendorbit.sh \
+            lib/*.sh \
+            modules/*.sh
+          echo "ShellCheck completed with no critical errors"

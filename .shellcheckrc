@@ -1,0 +1,7 @@
+shell=bash
+severity=warning
+disable=SC1090
+disable=SC1091
+disable=SC2034
+disable=SC2154
+disable=SC2188

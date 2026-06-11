@@ -1,0 +1,14 @@
+# Logs
+logs/
+
+# User configuration (never commit)
+config/hosts.conf
+config/known_hosts
+
+# Backups and temporary files
+*.bak
+*.tmp
+*~
+
+# macOS
+.DS_Store
