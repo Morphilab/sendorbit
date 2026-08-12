@@ -4,6 +4,7 @@
 
 set -euo pipefail
 
+INVOCATION_DIR="$(pwd)"  # user's cwd, preserved across the internal cd below
 cd "$(dirname "${BASH_SOURCE[0]}")" || { echo "ERROR: Cannot change to project directory" >&2; exit 1; }
 PROJECT_ROOT="$PWD"
 export PROJECT_ROOT
@@ -236,6 +237,10 @@ Usage:
                                                Send files (non-interactive)
   $0 --dry-run --transfer <scp|rsync> <user> <host> <port> <dest> [files...]
                                                Show what would be transferred
+  $0 --push-dir --host <index> [--scp] [--dry-run]
+                                               Send current directory ($PWD) to a
+                                               configured host (rsync + backup by
+                                               default; --scp forces SCP)
 
 Configuration: config/hosts.conf
 All SSH options (timeout, keepalive, host-key verification, etc.) are
@@ -298,6 +303,59 @@ run_transfer() {
     "$MODULES_DIR/transfer.sh" "$type" "$user" "$host" "$port" "$dest" "$@"
 }
 
+run_push_dir() {
+    local host_idx="" method="rsync"
+
+    while (( $# > 0 )); do
+        case "$1" in
+            --host)
+                [[ $# -lt 2 ]] && { print_color "${R}ERROR: --host requires an argument${NC}" >&2; exit 1; }
+                host_idx="$2"
+                shift 2
+                ;;
+            --scp) method="scp"; shift ;;
+            --dry-run) DRY_RUN=1; shift ;;
+            *) print_color "${R}ERROR: Unknown option for --push-dir: $1${NC}" >&2; exit 1 ;;
+        esac
+    done
+
+    [[ -z "$host_idx" ]] && {
+        print_color "${R}ERROR: --push-dir requires --host <index>${NC}" >&2
+        exit 1
+    }
+
+    [[ ! "$host_idx" =~ ^[0-9]+$ ]] && {
+        print_color "${R}ERROR: --host must be a numeric index (1..${#configs[@]})${NC}" >&2
+        exit 1
+    }
+
+    (( host_idx < 1 || host_idx > ${#configs[@]} )) && {
+        print_color "${R}ERROR: --host index out of range (1..${#configs[@]})${NC}" >&2
+        exit 1
+    }
+
+    local idx=$((host_idx - 1))
+    local user host folder port
+    parse_config_entry "$idx" user host folder port
+
+    if ! validate_user "$user" || ! validate_secure_host "$host"; then
+        print_color "${R}ERROR: Invalid user or host${NC}" >&2
+        exit 1
+    fi
+
+    local dest_path
+    dest_path=$(resolve_dest_path "$folder")
+    local dest_norm="${dest_path%/}/"
+
+    if [[ -n "${DRY_RUN:-}" ]]; then
+        print_color "${Y}[DRY-RUN] Would ${method}: $INVOCATION_DIR → $user@$host:$port $dest_norm${NC}"
+        return 0
+    fi
+
+    log_security "push-dir ${method} → $user@$host:$port $dest_path (cwd: $INVOCATION_DIR)"
+    "$MODULES_DIR/transfer.sh" "$method" "$user" "$host" "$port" "$dest_path" "$INVOCATION_DIR"
+}
+
 # ====================== MAIN ======================
 main() {
     case "${1:-}" in
@@ -332,6 +390,17 @@ main() {
             init_system || exit 1
             run_transfer --dry-run "$@"
             exit $?
+            ;;
+        --push-dir)
+            shift
+            init_system || exit 1
+            load_configuration || exit 1
+            run_push_dir "$@"
+            exit $?
+            ;;
+        --host)
+            print_color "${R}ERROR: --host requires --push-dir${NC}" >&2
+            exit 1
             ;;
     esac
 
