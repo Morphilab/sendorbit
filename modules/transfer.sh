@@ -38,7 +38,7 @@ main() {
     printf '\n'
 
     local remote_dest
-    printf -v remote_dest '%q' "${dest_path}/"
+    remote_dest="${dest_path%/}/"
 
     local result=0
     case "$type" in
