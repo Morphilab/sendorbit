@@ -1,6 +1,6 @@
 #!/bin/bash
-# sendorbit.sh - sendorbit v1.0.0
-# Modular, secure SSH connection + transfer manager
+# sendorbit.sh - Modular SSH connection + transfer manager
+# Delegates all SSH behavior to ~/.ssh/config
 
 set -euo pipefail
 
@@ -13,9 +13,6 @@ MODULES_DIR="$PROJECT_ROOT/modules"
 LIB_DIR="$PROJECT_ROOT/lib"
 LOGS_DIR="$PROJECT_ROOT/logs"
 LOCK_FILE="$LOGS_DIR/sendorbit.lock"
-
-# ====================== VERSION ======================
-# VERSION is defined in lib/utils.sh
 
 # ====================== DEPENDENCY LOADING ======================
 load_all_dependencies() {
@@ -38,26 +35,41 @@ load_all_dependencies
 
 # ====================== INITIALIZATION ======================
 init_system() {
+    # Sanitize PATH FIRST — before any command (trap/date/whoami/flock) runs, so a
+    # hostile directory cannot hijack binaries via self-env.
+    PATH="/usr/local/bin:/usr/bin:/bin"
+    export PATH
+
     trap clean_resources EXIT INT TERM HUP
     trap 'log_error "Unexpected error at line $LINENO: $BASH_COMMAND"' ERR
 
+    umask 077
     mkdir -p "$LOGS_DIR" "$CONFIG_DIR"
 
+    # FD 9 (the flock lock) has no close-on-exec, so every child (ssh/scp/rsync and
+    # modules) inherits it and the lock lives on the shared open file description:
+    # it stays held until the last holder exits, and nothing else can take it while
+    # the session runs. This open fd is what makes single-instance exclusion atomic.
     exec 9>"$LOCK_FILE" || { echo "ERROR: Cannot create lock at $LOCK_FILE" >&2; exit 1; }
-    if ! flock -n 9; then
-        echo "Another instance of sendorbit is already running"
-        exit 1
+    if command -v flock >/dev/null 2>&1; then
+        if ! flock -n 9; then
+            echo "Another instance of sendorbit is already running"
+            exit 1
+        fi
+    else
+        print_color "${Y}WARNING: 'flock' not found — single-instance lock disabled${NC}"
     fi
+
+    # Modules inherit fd 9 (same open file description), so re-locking there would
+    # spuriously succeed; they rely on the SENDORBIT_SESSION guard and only take
+    # their own lock when invoked directly (see module_session_init in utils.sh).
+    export SENDORBIT_SESSION=1
 
     init_logging
     init_security_log
 
     log_info "Initializing sendorbit v${VERSION}"
     log_security "Session start - User: $(whoami) - Version: ${VERSION}"
-
-    # Sanitize PATH before resolving binary paths
-    PATH="/usr/local/bin:/usr/bin:/bin"
-    export PATH
 
     check_dependencies || { log_error "Missing dependencies"; return 1; }
 
@@ -80,20 +92,19 @@ load_configuration() {
     }
     validate_configuration "$file" || { log_error "Invalid configuration"; return 1; }
 
-    # shellcheck disable=SC2154
     log_info "Loaded ${#configs[@]} hosts from hosts.conf"
 }
 
 # ====================== MAIN MENU ======================
 show_main_menu() {
     print_color "${G}╔════════════════════════════════════════════╗${NC}"
-    print_color "${G}║              sendorbit v${VERSION}               ║${NC}"
+    print_color "${G}║              sendorbit v${VERSION}              ║${NC}"
     print_color "${G}╚════════════════════════════════════════════╝${NC}"
 
     if (( ${#configs[@]} == 0 )); then
         print_color "${R}No hosts configured.${NC}"
         print_color "${Y}Edit config/hosts.conf and re-run.${NC}"
-        read -r -t 120 -p "Press Enter to exit..."
+        read -r -t 120 -p "Press Enter to exit..." || true
         return 1
     fi
 
@@ -116,9 +127,15 @@ show_available_hosts() {
 
 get_user_selection() {
     local max=${#configs[@]}
+    local sel rc
     while true; do
         print_color_n "${B}Host (1-$max) or 'q' to quit: ${NC}"
-        read -r -t 120 sel || { print_color "${Y}Input timed out${NC}"; continue; }
+        rc=0
+        safe_read 120 sel || rc=$?
+        case $rc in
+            124) continue ;;
+            1) print_color ""; log_security "Input stream closed"; exit 0 ;;
+        esac
         case "$sel" in
             q|Q) log_security "Voluntary exit"; exit 0 ;;
             ''|*[!0-9]*) print_color "${R}Invalid input${NC}" ;;
@@ -143,9 +160,15 @@ show_actions_menu() {
 }
 
 get_action_selection() {
+    local acc rc
     while true; do
         print_color_n "${B}Select action (1-5): ${NC}"
-        read -r -t 120 acc || { print_color "${Y}Input timed out${NC}"; continue; }
+        rc=0
+        safe_read 120 acc || rc=$?
+        case $rc in
+            124) continue ;;
+            1) print_color ""; log_security "Input stream closed"; exit 0 ;;
+        esac
         if [[ "$acc" =~ ^[1-5]$ ]]; then
             ACTION_SELECTION="$acc"
             log_security "Action selected: $acc"
@@ -159,9 +182,26 @@ get_action_selection() {
 # ====================== TRANSFERS ======================
 manage_transfer() {
     local type="$1" user="$2" host="$3" port="$4" dest_path="$5"
+    local confirm
 
     print_color_n "${B}Files to transfer (space-separated): ${NC}"
-    read -r -t 300 -ra files
+    local files_input=""
+    local fsrc_rc=0
+    safe_read 300 files_input || fsrc_rc=$?
+    if (( fsrc_rc != 0 )); then
+        print_color "${R}No file list provided (timeout or input closed)${NC}" >&2
+        return 1
+    fi
+    local -a files=()
+    read -r -ra files <<< "$files_input"
+
+    # TUI splits input on spaces; a filename with spaces would be silently
+    # mis-transferred as its parts. Fail-safe: if the whole input
+    # names a single existing file but contains spaces, reject with guidance.
+    if [[ "$files_input" == *" "* && -e "$files_input" ]]; then
+        print_color "${R}ERROR: TUI does not support filenames with spaces (ambiguous list). Use --transfer instead.${NC}"
+        return 1
+    fi
 
     [[ ${#files[@]} -eq 0 ]] && {
         print_color "${R}No files selected${NC}"
@@ -171,7 +211,8 @@ manage_transfer() {
     validate_transfer_files "${files[@]}" || return 1
 
     print_color_n "${Y}$type: send ${files[*]} to $user@$host${port:+:$port}:$dest_path/? (y/N): ${NC}"
-    read -r -t 60 confirm
+    confirm=""
+    safe_read 60 confirm || true
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { print_color "Transfer cancelled"; return 0; }
 
     log_security "$type → $user@$host:$port $dest_path"
@@ -186,18 +227,25 @@ show_system_logs() {
     tail -n 100 "${LOG_FILE:-$LOGS_DIR/sendorbit.log}" 2>/dev/null || echo "No logs yet"
     print_color "${B}=== SECURITY LOG (last 100 lines) ===${NC}"
     tail -n 100 "$LOGS_DIR/security.log" 2>/dev/null || echo "No security logs yet"
-    read -r -t 120 -p "Press Enter to continue..."
+    read -r -t 120 -p "Press Enter to continue..." || true
 }
 
 # ====================== CLEANUP ======================
 clean_resources() {
-    log_info "Cleaning temporary resources..."
-    rm -f "$LOCK_FILE" 2>/dev/null || true
+    # Lock file is intentionally NOT unlinked: deleting it while another instance
+    # may still hold its FD breaks mutual exclusion (classic flock-unlink race).
+    log_info "Session finished"
+    # Rotate at session close too: log_info runs first so the closing message is
+    # never lost to rotation, and a session outliving a rotation interval still
+    # leaves rotated files behind instead of one unbounded log.
+    rotate_logs
+    rotate_security_log
 }
 
 # ====================== ACTION PROCESSING ======================
 process_action() {
     local user="$1" host="$2" folder="$3" port="${4:-22}" action="$5"
+    local confirm
 
     if ! validate_secure_host "$host" || ! validate_user "$user"; then
         print_color "${R}Invalid host or user for security reasons${NC}"
@@ -210,7 +258,8 @@ process_action() {
     case "$action" in
         1)
             print_color_n "${Y}Connect to $user@$host${port:+:$port}? (y/N): ${NC}"
-            read -r -t 60 confirm
+            confirm=""
+            safe_read 60 confirm || true
             [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { print_color "Connection cancelled"; return 0; }
             "$MODULES_DIR/connection.sh" "$user" "$host" "$port"
             ;;
@@ -229,13 +278,13 @@ sendorbit v${VERSION} — SSH connection and transfer manager
 
 Usage:
   $0                                          Interactive TUI mode
-  $0 --version                                Print version and exit
-  $0 --help                                   Show this help and exit
+  $0 --version|-v                             Print version and exit
+  $0 --help|-h                                Show this help and exit
   $0 --list                                   List configured hosts and exit
   $0 --connect <user> <host> [port]            Open SSH connection (non-interactive)
-  $0 --transfer <scp|rsync> <user> <host> <port> <dest> [files...]
+  $0 --transfer <scp|rsync> <user> <host> <port> <dest> <file> [files...]
                                                Send files (non-interactive)
-  $0 --dry-run --transfer <scp|rsync> <user> <host> <port> <dest> [files...]
+  $0 --dry-run --transfer <scp|rsync> <user> <host> <port> <dest> <file> [files...]
                                                Show what would be transferred
   $0 --push-dir --host <index> [--scp] [--dry-run]
                                                Send current directory ($PWD) to a
@@ -266,8 +315,19 @@ list_hosts() {
 run_connect() {
     local user="$1" host="$2" port="${3:-22}"
 
+    # Reject a present-but-empty port instead of silently falling back to 22
+    if (( $# >= 3 )) && [[ -z "$3" ]]; then
+        print_color "${R}ERROR: Port argument is present but empty${NC}" >&2
+        exit 1
+    fi
+
     if ! validate_user "$user" || ! validate_secure_host "$host"; then
         print_color "${R}ERROR: Invalid user or host${NC}" >&2
+        exit 1
+    fi
+
+    if ! validate_port "$port"; then
+        print_color "${R}ERROR: Invalid port: $port${NC}" >&2
         exit 1
     fi
 
@@ -277,20 +337,38 @@ run_connect() {
 }
 
 run_transfer() {
-    local dry_run="${1:-}"
-    shift
-    [[ "$dry_run" == "--dry-run" ]] && { DRY_RUN=1; shift; }
-
     if (( $# < 6 )); then
-        print_color "${R}Usage: $0 --transfer <scp|rsync> <user> <host> <port> <dest> [files...]${NC}" >&2
+        print_color "${R}Usage: $0 [--dry-run] --transfer <scp|rsync> <user> <host> <port> <dest> <file> [files...]${NC}" >&2
+        exit 1
+    fi
+
+    # Reject a present-but-empty port; $4 is guaranteed set by the arity check above
+    if [[ -z "$4" ]]; then
+        print_color "${R}ERROR: Port argument is present but empty${NC}" >&2
         exit 1
     fi
 
     local type="$1" user="$2" host="$3" port="$4" dest="$5"
     shift 5
 
+    # Whitelist the transfer type before any branch (incl. DRY_RUN) prints it
+    if [[ "$type" != "scp" && "$type" != "rsync" ]]; then
+        print_color "${R}ERROR: Invalid transfer type: $type${NC}" >&2
+        exit 1
+    fi
+
     if ! validate_user "$user" || ! validate_secure_host "$host"; then
         print_color "${R}ERROR: Invalid user or host${NC}" >&2
+        exit 1
+    fi
+
+    if ! validate_port "$port"; then
+        print_color "${R}ERROR: Invalid port: $port${NC}" >&2
+        exit 1
+    fi
+
+    if ! validate_folder_path "$dest"; then
+        print_color "${R}ERROR: Invalid destination path: $dest${NC}" >&2
         exit 1
     fi
 
@@ -375,20 +453,34 @@ main() {
             ;;
         --connect)
             shift
+            if (( $# < 2 )); then
+                print_color "${R}ERROR: Usage: $0 --connect <user> <host> [port]${NC}" >&2
+                exit 1
+            fi
             init_system || exit 1
             run_connect "$@"
             exit $?
             ;;
         --transfer)
             shift
+            if (( $# < 6 )); then
+                print_color "${R}ERROR: Usage: $0 [--dry-run] --transfer <scp|rsync> <user> <host> <port> <dest> <file> [files...]${NC}" >&2
+                exit 1
+            fi
             init_system || exit 1
             run_transfer "$@"
             exit $?
             ;;
         --dry-run)
             shift
+            [[ "${1:-}" == "--transfer" ]] || {
+                print_color "${R}ERROR: --dry-run must be followed by --transfer${NC}" >&2
+                exit 1
+            }
+            shift
             init_system || exit 1
-            run_transfer --dry-run "$@"
+            DRY_RUN=1
+            run_transfer "$@"
             exit $?
             ;;
         --push-dir)
@@ -400,6 +492,14 @@ main() {
             ;;
         --host)
             print_color "${R}ERROR: --host requires --push-dir${NC}" >&2
+            exit 1
+            ;;
+        "")
+            : # no args → interactive TUI (handled after the case)
+            ;;
+        *)
+            print_color "${R}ERROR: Unknown option: ${1:-}${NC}" >&2
+            usage
             exit 1
             ;;
     esac
@@ -431,7 +531,7 @@ main() {
         process_action "$user" "$host" "$folder" "$port" "$ACTION_SELECTION" || print_color "${R}Action finished with errors${NC}"
 
         echo ""
-        read -r -t 120 -p "Press Enter to return to main menu..."
+        read -r -t 120 -p "Press Enter to return to main menu..." || true
     done
 }
 

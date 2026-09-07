@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# lib/security.sh - Security functions - sendorbit v1.0.0
+# lib/security.sh - Security functions
 
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 LOGS_DIR="${LOGS_DIR:-$PROJECT_ROOT/logs}"
@@ -19,14 +19,25 @@ rotate_security_log() {
     rotate_file "$SECURITY_LOG" "$MAX_SEC_LOG_SIZE" "$MAX_SEC_LOG_FILES"
 }
 
+# Neutralize line breaks so hostile input cannot forge log entries.
+sanitize_log_field() {
+    local s="$1"
+    s=${s//$'\r'/ }
+    s=${s//$'\n'/ }
+    s=${s//$'\t'/ }
+    printf '%s' "$s"
+}
+
 log_security() {
-    local message="$1"
+    local message
+    message=$(sanitize_log_field "$1")
     local timestamp
     timestamp=$(date "+%Y-%m-%d %H:%M:%S")
     echo "[$timestamp] [SECURITY] $message" >> "$SECURITY_LOG"
 }
 
 validate_secure_host() {
+    local LC_ALL=C
     local host="$1"
 
     local dangerous_patterns=(

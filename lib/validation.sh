@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# lib/validation.sh - Centralized validations - sendorbit v1.0.0
+# lib/validation.sh - Centralized validations
 
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 source "$PROJECT_ROOT/lib/utils.sh"
@@ -24,6 +24,13 @@ validate_configuration() {
     configs=()
     local in_array=0
     while IFS= read -r line || [[ -n "$line" ]]; do
+        # A '#' inside a quoted value would be silently truncated by the comment
+        # strip below; reject it explicitly instead.
+        if [[ "$in_array" -eq 1 && "$line" =~ ^[[:space:]]*\"[^\"]*# ]]; then
+            show_message "Invalid entry at index ${#configs[@]}: '#' not allowed inside quoted values" "ERROR"
+            return 1
+        fi
+
         line="${line%%#*}"
         [[ -z "$line" ]] && continue
 
@@ -41,7 +48,7 @@ validate_configuration() {
         fi
 
         [[ "$in_array" -eq 0 ]] && continue
-        if [[ "$rest" =~ ^[[:space:]]*\)[[:space:]]*$ ]]; then
+        if [[ "$line" =~ ^[[:space:]]*\)[[:space:]]*$ ]]; then
             in_array=0
             continue
         fi
@@ -70,10 +77,30 @@ validate_configuration() {
 
 # ====================== CENTRALIZED VALIDATIONS ======================
 validate_user() {
+    local LC_ALL=C
     local user="$1"
     [[ -z "$user" || ${#user} -lt 1 || ${#user} -gt 32 ]] && return 1
     [[ ! "$user" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]] && return 1
     [[ "$user" =~ -$ ]] && return 1
+    return 0
+}
+
+validate_port() {
+    local port="$1"
+    [[ ! "$port" =~ ^[0-9]{1,5}$ ]] && return 1
+    # Leading zeros rejected for consistency with validate_ip octets ("0080" != "80")
+    [[ "$port" =~ ^0[0-9] ]] && return 1
+    (( 10#$port < 1 || 10#$port > 65535 )) && return 1
+    return 0
+}
+
+validate_folder_path() {
+    local path="$1"
+    [[ -z "$path" ]] && return 1
+    [[ "$path" =~ (^|/)\.\.(/|$) ]] && return 1
+    [[ "$path" =~ [\;\`\$\&\|\<\>\(\)\{\}] ]] && return 1
+    # Control chars break remote shells (scp legacy) and forge multi-line log entries.
+    [[ "$path" == *[$'\n\t\r']* ]] && return 1
     return 0
 }
 
@@ -91,7 +118,10 @@ validate_ip() {
 }
 
 validate_hostname() {
+    local LC_ALL=C
     local hostname="$1"
+    # RFC 1035: presentation-format names are limited to 253 characters overall
+    (( ${#hostname} > 253 )) && return 1
     [[ "$hostname" =~ ^[a-zA-Z0-9_]([a-zA-Z0-9_-]{0,61}[a-zA-Z0-9_])?(\.[a-zA-Z0-9_]([a-zA-Z0-9_-]{0,61}[a-zA-Z0-9_])?)*$ ]]
 }
 
@@ -109,13 +139,13 @@ validate_config_entry() {
     validate_user "$user" || return 1
     (validate_ip "$host" || validate_hostname "$host") || return 1
 
-    [[ "$folder" =~ (^|/)\.\.(/|$) ]] && { show_message "Path traversal detected in folder: $folder" "ERROR"; return 1; }
-    [[ "$folder" =~ [\;\`\$\&\|\<\>\(\)\{\}] ]] && { show_message "Dangerous characters in folder: $folder" "ERROR"; return 1; }
+    if ! validate_folder_path "$folder"; then
+        show_message "Invalid folder path: $folder" "ERROR"
+        return 1
+    fi
 
     if (( ${#elements[@]} >= 4 )); then
-        local port="${elements[3]}"
-        [[ ! "$port" =~ ^[0-9]+$ ]] && return 1
-        (( port < 1 || port > 65535 )) && return 1
+        validate_port "${elements[3]}" || return 1
     fi
 
     return 0

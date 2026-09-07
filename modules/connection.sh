@@ -1,6 +1,5 @@
 #!/bin/bash
 # modules/connection.sh - Secure SSH connections
-# sendorbit v1.0.0
 
 set -euo pipefail
 
@@ -13,8 +12,14 @@ source "$PROJECT_ROOT/lib/security.sh"
 main() {
     PATH="/usr/local/bin:/usr/bin:/bin"
     export PATH
+    umask 077
     if [[ -z "$SSH_CMD" ]]; then
         check_dependencies || exit 1
+    fi
+
+    module_session_init
+    if [[ -z "${SENDORBIT_SESSION:-}" ]]; then
+        log_security "MODULE $0 invoked directly"
     fi
 
     if [[ $# -lt 2 || $# -gt 3 ]]; then
@@ -24,7 +29,7 @@ main() {
 
     local user="$1" host="$2" port="${3:-22}"
 
-    if ! validate_secure_host "$host" || ! validate_user "$user"; then
+    if ! validate_secure_host "$host" || ! validate_user "$user" || ! validate_port "$port"; then
         printf '%b\n' "${R}ERROR: Invalid parameters for security reasons${NC}"
         exit 1
     fi

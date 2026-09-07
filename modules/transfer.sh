@@ -1,6 +1,5 @@
 #!/bin/bash
 # modules/transfer.sh - SCP and RSync transfers with automatic backup
-# sendorbit v1.0.0
 
 set -euo pipefail
 
@@ -13,8 +12,14 @@ source "$PROJECT_ROOT/lib/security.sh"
 main() {
     PATH="/usr/local/bin:/usr/bin:/bin"
     export PATH
+    umask 077
     if [[ -z "$SSH_CMD" ]]; then
         check_dependencies || exit 1
+    fi
+
+    module_session_init
+    if [[ -z "${SENDORBIT_SESSION:-}" ]]; then
+        log_security "MODULE $0 invoked directly"
     fi
 
     if [[ $# -lt 5 ]]; then
@@ -25,8 +30,13 @@ main() {
     local type="$1" user="$2" host="$3" port="$4" dest_path="$5"
     shift 5
 
-    if ! validate_secure_host "$host" || ! validate_user "$user"; then
+    if ! validate_secure_host "$host" || ! validate_user "$user" || ! validate_port "$port"; then
         printf '%b\n' "${R}ERROR: Invalid parameters for security reasons${NC}"
+        exit 1
+    fi
+
+    if ! validate_folder_path "$dest_path"; then
+        printf '%b\n' "${R}ERROR: Invalid destination path for security reasons${NC}"
         exit 1
     fi
 
@@ -48,32 +58,30 @@ main() {
             ;;
         "rsync")
             printf '%b\n' "${Y}Running RSync with automatic backup...${NC}"
-            local timestamp
+            local timestamp backup_dir ssh_cmd
             timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
-            local backup_path="${dest_path}/backup/${timestamp}"
-
-            # Explicitly backup existing remote files before rsync overwrites them
-            local remote_backup_cmd=""
-            local fname qfile qbackup
-            for f in "$@"; do
-                fname=$(basename "$f")
-                printf -v qfile '%q' "${dest_path}/${fname}"
-                printf -v qbackup '%q' "$backup_path"
-                remote_backup_cmd+="[ -f $qfile ] && mkdir -p $qbackup && cp $qfile $qbackup; "
-            done
-
-            if [[ -n "$remote_backup_cmd" ]]; then
-                printf '%b\n' "${B}Backing up existing files on remote...${NC}"
-                "${SSH_CMD:-ssh}" -p "$port" "$user@$host" \
-                    "$remote_backup_cmd" || printf '%b\n' "${Y}WARNING: Some backups may have failed${NC}"
-            fi
+            backup_dir="${dest_path%/}/backup/${timestamp}"
 
             local -a rsync_ssh=("${SSH_CMD:-ssh}" -p "$port")
-            local ssh_cmd
             printf -v ssh_cmd '%s ' "${rsync_ssh[@]}"
             ssh_cmd="${ssh_cmd% }"
+
+            # Backup dir must exist before rsync --backup-dir writes into it.
+            # %q quoting keeps the remote shell from interpreting metacharacters.
+            printf '%b\n' "${B}Creating remote backup directory...${NC}"
+            if ! "${SSH_CMD:-ssh}" -p "$port" "$user@$host" \
+                    "$(printf 'mkdir -p %q' "$backup_dir")"; then
+                printf '%b\n' "${R}ERROR: Cannot create remote backup directory. Aborting to avoid data loss.${NC}"
+                return 1
+            fi
+
+            # Native rsync backup: every file this sync would overwrite or delete
+            # is moved into backup_dir (recursive; also covers directory pushes).
+            printf '%b\n' "${B}Overwritten remote files will be kept in ${backup_dir}/${NC}"
             printf '%b\n' "${Y}Syncing files...${NC}"
-            "${RSYNC_CMD:-rsync}" -avz -e "$ssh_cmd" -- "$@" "${user}@${host}:${remote_dest}" || result=$?
+            "${RSYNC_CMD:-rsync}" -avz --backup --backup-dir="${backup_dir}/" \
+                --exclude=/backup/ \
+                -e "$ssh_cmd" -- "$@" "${user}@${host}:${remote_dest}" || result=$?
             ;;
         *)
             printf '%b\n' "${R}ERROR: Invalid type: $type${NC}"
