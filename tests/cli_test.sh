@@ -2,7 +2,11 @@
 
 load setup
 
+# sendorbit.sh resets LOGS_DIR to "$PROJECT_ROOT/logs" when sourced; preserve
+# the isolated temp dir from setup.bash so tests never touch the real logs/.
+ISOLATED_LOGS_DIR="$LOGS_DIR"
 source "$SENDORBIT_ROOT/sendorbit.sh"
+export LOGS_DIR="$ISOLATED_LOGS_DIR"
 
 setup() {
     configs=("alice host1 /home/alice 22")
