@@ -123,6 +123,14 @@ load setup
     [ "$status" -eq 1 ]
 }
 
+@test "validate_user: rejects accented user even under non-C locale" {
+    if ! locale -a 2>/dev/null | grep -qi '^es_ES'; then
+        skip "es_ES locale not available"
+    fi
+    LC_ALL=es_ES.UTF-8 run validate_user "rúst"
+    [ "$status" -eq 1 ]
+}
+
 # ====================== validate_hostname ======================
 
 @test "validate_hostname: accepts simple hostname" {
@@ -150,9 +158,33 @@ load setup
     [ "$status" -eq 1 ]
 }
 
+@test "validate_hostname: rejects accented hostname even under non-C locale" {
+    if ! locale -a 2>/dev/null | grep -qi '^es_ES'; then
+        skip "es_ES locale not available"
+    fi
+    LC_ALL=es_ES.UTF-8 run validate_hostname "hóst"
+    [ "$status" -eq 1 ]
+}
+
 @test "validate_hostname: accepts hostname with numbers" {
     run validate_hostname "server-01.example.com"
     [ "$status" -eq 0 ]
+}
+
+@test "validate_hostname: accepts exactly 253 chars (RFC 1035 max)" {
+    local h
+    h="$(printf 'a%.0s' {1..63}).$(printf 'b%.0s' {1..63}).$(printf 'c%.0s' {1..63}).$(printf 'd%.0s' {1..61})"
+    [ "${#h}" -eq 253 ]
+    run validate_hostname "$h"
+    [ "$status" -eq 0 ]
+}
+
+@test "validate_hostname: rejects total length over 253 chars" {
+    local h
+    h="$(printf 'a%.0s' {1..63}).$(printf 'b%.0s' {1..63}).$(printf 'c%.0s' {1..63}).$(printf 'd%.0s' {1..62})"
+    [ "${#h}" -eq 254 ]
+    run validate_hostname "$h"
+    [ "$status" -eq 1 ]
 }
 
 # ====================== validate_config_entry ======================
@@ -321,7 +353,7 @@ load setup
 }
 
 @test "validate_configuration: rejects missing file" {
-    run validate_configuration "/tmp/opencode/nonexistent_config_abc"
+    run validate_configuration "/tmp/nonexistent_config_abc"
     [ "$status" -eq 1 ]
 }
 
@@ -352,6 +384,16 @@ load setup
     rm -f "$tmpconf"
 }
 
+@test "validate_configuration: rejects '#' inside quoted values" {
+    local tmpconf
+    tmpconf=$(mktemp)
+    printf 'configs=(\n  "user#x 192.0.2.1 /tmp"\n)\n' > "$tmpconf"
+    run validate_configuration "$tmpconf"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"not allowed inside quoted values"* ]]
+    rm -f "$tmpconf"
+}
+
 @test "validate_configuration: rejects empty configs array" {
     local tmpconf
     tmpconf=$(mktemp)
@@ -359,4 +401,168 @@ load setup
     run validate_configuration "$tmpconf"
     [ "$status" -eq 1 ]
     rm -f "$tmpconf"
+}
+
+# Multi-line array characterization tests: direct invocation (not bats `run`)
+# because `run` executes in a subshell and global array mutations would be lost.
+@test "validate_configuration: parses standard multi-line array" {
+    local f="$LOGS_DIR/ml1.conf" st=0
+    printf 'configs=(\n  "u1 h1 f1"\n  "u2 h2 f2 2222"\n)\n' > "$f"
+    configs=()
+    validate_configuration "$f" || st=$?
+    [ "$st" -eq 0 ]
+    [ "${#configs[@]}" -eq 2 ]
+}
+
+@test "validate_configuration: ignores content after array close paren" {
+    local f="$LOGS_DIR/ml2.conf" st=0
+    printf 'configs=(\n"u1 h1 f1"\n)\n"this is not a host entry"\n' > "$f"
+    configs=()
+    validate_configuration "$f" || st=$?
+    [ "$st" -eq 0 ]
+    [ "${#configs[@]}" -eq 1 ]
+    [[ "${configs[0]}" == "u1 h1 f1" ]]
+}
+
+@test "validate_configuration: comments and blanks inside multi-line array" {
+    local f="$LOGS_DIR/ml3.conf" st=0
+    printf '# head\nconfigs=(\n# inner\n"u1 h1 f1"\n\n"u2 h2 f2 2222"   # inline\n)\n' > "$f"
+    configs=()
+    validate_configuration "$f" || st=$?
+    [ "$st" -eq 0 ]
+    [ "${#configs[@]}" -eq 2 ]
+}
+
+# ====================== validate_port ======================
+
+@test "validate_port: accepts port 22" {
+    run validate_port "22"
+    [ "$status" -eq 0 ]
+}
+
+@test "validate_port: accepts port 65535" {
+    run validate_port "65535"
+    [ "$status" -eq 0 ]
+}
+
+@test "validate_port: accepts port 1" {
+    run validate_port "1"
+    [ "$status" -eq 0 ]
+}
+
+@test "validate_port: rejects port 0" {
+    run validate_port "0"
+    [ "$status" -eq 1 ]
+}
+
+@test "validate_port: rejects port 65536" {
+    run validate_port "65536"
+    [ "$status" -eq 1 ]
+}
+
+@test "validate_port: rejects non-numeric port" {
+    run validate_port "abc"
+    [ "$status" -eq 1 ]
+}
+
+@test "validate_port: rejects port with injection suffix" {
+    run validate_port '22;touch'
+    [ "$status" -eq 1 ]
+}
+
+@test "validate_port: rejects negative port" {
+    run validate_port "-1"
+    [ "$status" -eq 1 ]
+}
+
+@test "validate_port: rejects empty port" {
+    run validate_port ""
+    [ "$status" -eq 1 ]
+}
+
+@test "validate_port: rejects huge numeric port" {
+    run validate_port "99999999999"
+    [ "$status" -eq 1 ]
+}
+
+@test "validate_port: rejects port with leading zero (0080)" {
+    run validate_port "0080"
+    [ "$status" -eq 1 ]
+}
+
+@test "validate_port: rejects multi-digit leading zero (0077)" {
+    run validate_port "0077"
+    [ "$status" -eq 1 ]
+}
+
+# ====================== validate_folder_path ======================
+
+@test "validate_folder_path: accepts absolute path" {
+    run validate_folder_path "/home/user/deploy"
+    [ "$status" -eq 0 ]
+}
+
+@test "validate_folder_path: accepts relative folder" {
+    run validate_folder_path "backups"
+    [ "$status" -eq 0 ]
+}
+
+@test "validate_folder_path: accepts dot-paths" {
+    run validate_folder_path "path/.hidden/file"
+    [ "$status" -eq 0 ]
+}
+
+@test "validate_folder_path: rejects empty path" {
+    run validate_folder_path ""
+    [ "$status" -eq 1 ]
+}
+
+@test "validate_folder_path: rejects traversal" {
+    run validate_folder_path "../etc"
+    [ "$status" -eq 1 ]
+}
+
+@test "validate_folder_path: rejects nested traversal" {
+    run validate_folder_path "a/b/../../../c"
+    [ "$status" -eq 1 ]
+}
+
+@test "validate_folder_path: rejects semicolon" {
+    run validate_folder_path 'folder;rm'
+    [ "$status" -eq 1 ]
+}
+
+@test "validate_folder_path: rejects command substitution" {
+    run validate_folder_path 'folder$(x)'
+    [ "$status" -eq 1 ]
+}
+
+@test "validate_folder_path: rejects backtick" {
+    run validate_folder_path 'folder`x`'
+    [ "$status" -eq 1 ]
+}
+
+@test "validate_folder_path: rejects pipe and redirections" {
+    run validate_folder_path 'a|b>c<d'
+    [ "$status" -eq 1 ]
+}
+
+@test "validate_folder_path: rejects newline (remote shell injection / log forging)" {
+    run validate_folder_path "$(printf 'x\nMALICIOUS')"
+    [ "$status" -eq 1 ]
+}
+
+@test "validate_folder_path: rejects tab" {
+    run validate_folder_path "$(printf 'a\tb')"
+    [ "$status" -eq 1 ]
+}
+
+@test "validate_folder_path: rejects CR" {
+    run validate_folder_path "$(printf 'a\rb')"
+    [ "$status" -eq 1 ]
+}
+
+@test "validate_folder_path: still accepts spaces (legitimate paths)" {
+    run validate_folder_path "my documents/app"
+    [ "$status" -eq 0 ]
 }

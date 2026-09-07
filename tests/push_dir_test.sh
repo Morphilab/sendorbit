@@ -47,6 +47,22 @@ setup() {
     [[ "$output" == *"Unknown option"* ]]
 }
 
+# ====================== run_push_dir: config load-time rejection ======================
+
+@test "push-dir: config entry with tab in folder is rejected at load time" {
+    local confdir saved_config_dir st
+    confdir=$(mktemp -d)
+    printf 'configs=("u1 host1 do\tcuments")\n' > "$confdir/hosts.conf"
+    saved_config_dir="$CONFIG_DIR"
+    CONFIG_DIR="$confdir"
+    run load_configuration
+    st=$status
+    CONFIG_DIR="$saved_config_dir"
+    rm -rf "$confdir"
+    [ "$st" -eq 1 ]
+    [[ "$output" == *"Invalid"* ]]
+}
+
 # ====================== run_push_dir: dry-run ======================
 
 @test "push_dir: dry-run uses rsync by default" {

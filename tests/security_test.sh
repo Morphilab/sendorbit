@@ -132,6 +132,14 @@ teardown_file() {
     [ "$status" -eq 1 ]
 }
 
+@test "validate_secure_host: rejects accented host even under non-C locale" {
+    if ! locale -a 2>/dev/null | grep -qi '^es_ES'; then
+        skip "es_ES locale not available"
+    fi
+    LC_ALL=es_ES.UTF-8 run validate_secure_host "hóst"
+    [ "$status" -eq 1 ]
+}
+
 # ====================== log_security ======================
 
 @test "log_security: writes SECURITY label" {
@@ -144,4 +152,28 @@ teardown_file() {
     test_msg="unique_test_message_$(date +%s)"
     run log_security "$test_msg"
     grep -q "$test_msg" "$SECURITY_LOG"
+}
+
+@test "log_security: neutralizes embedded newlines (log forging)" {
+    local forged
+    forged=$(printf 'host: X\nFAKE-ENTRY without timestamp')
+    log_security "$forged"
+    run grep -F 'FAKE-ENTRY without timestamp' "$SECURITY_LOG"
+    [[ "$status" -ne 0 ]] || {
+        # if it appears, it must be INSIDE a single timestamped line, never after \n
+        run grep -cE '^FAKE-ENTRY' "$SECURITY_LOG"
+        [ "$output" -eq "0" ]
+    }
+}
+
+@test "log_security: preserves single-line content intact" {
+    log_security "keep-me 100% intact"
+    run grep -F 'keep-me 100% intact' "$SECURITY_LOG"
+    [ "$status" -eq 0 ]
+}
+
+@test "init_security_log creates security log with 600 permissions" {
+    rm -f "$SECURITY_LOG"
+    init_security_log
+    [ "$(stat -c %a "$SECURITY_LOG")" = "600" ]
 }
