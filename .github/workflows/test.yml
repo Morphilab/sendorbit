@@ -15,8 +15,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install ShellCheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Install ShellCheck 0.9.0
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck=0.9.0
 
       - name: Verify Bash syntax (bash -n)
         run: |
@@ -24,8 +26,13 @@ jobs:
           find . -name "*.sh" -type f -not -path "./tests/*" -exec bash -n {} \;
           echo "All scripts have valid syntax"
 
-      - name: Install bats
-        run: sudo apt-get install -y bats
+      - name: Install bats 1.10.0 (from GitHub release)
+        run: |
+          cd /tmp
+          wget -q https://github.com/bats-core/bats-core/archive/v1.10.0.tar.gz
+          tar xzf v1.10.0.tar.gz
+          cd bats-core-*
+          sudo ./install.sh /usr/local
 
       - name: Run unit tests (bats)
         run: |
@@ -34,6 +41,9 @@ jobs:
           bats tests/security_test.sh
           bats tests/logging_test.sh
           bats tests/modules_test.sh
+          bats tests/push_dir_test.sh
+          bats tests/utils_test.sh
+          bats tests/cli_test.sh
 
       - name: Run ShellCheck (quality standard)
         run: |
