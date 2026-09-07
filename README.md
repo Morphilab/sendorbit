@@ -9,14 +9,15 @@ Modular SSH connection and SCP/RSync transfer manager written in Bash. Delegates
 ## Features
 
 - SSH connection (delegates all options to `~/.ssh/config` — timeouts, keepalive, compression, multiplexing, host-key verification)
-- SCP and RSync transfers with automatic timestamped backup on the remote
-- Anti-injection input validation (path traversal, shell metacharacters, argument injection)
-- Dual logging (general + security) with 10MB rotation (5 files max)
+- SCP and RSync transfers with automatic backup of overwritten remote files (native `rsync --backup --backup-dir`, aborts if the backup directory cannot be created)
+- Anti-injection input validation on **every** entry point: users, hosts, ports (`validate_port`) and destinations (`validate_folder_path`)
+- Robust interactive input: menus survive EOF (Ctrl-D) and prompt timeouts; confirmations fail safe (cancel)
+- Dual logging (general `600` + security) with 10MB rotation (5 files max), `umask 077` at startup
 - Configurable colors, no hardcoded values
-- Lock file via `flock` (no TOCTOU / symlink races)
+- Lock file via `flock` over a file descriptor; degrades gracefully if `flock` is unavailable
 - Config parser uses text-only extraction — no `source`/`eval` on user config
 - PATH sanitized before resolving binaries
-- 100 BATS unit tests + CI on every push
+- 200 BATS unit tests + CI on push and PR to main
 
 ## ⚠️ AI Disclosure / Divulgación de IA
 
@@ -57,7 +58,7 @@ chmod 600 config/hosts.conf
    ./sendorbit.sh
    ```
 
-3. Check version or help:
+3. Check version or help (`--version|-v`, `--help|-h`):
    ```bash
    ./sendorbit.sh --version
    ./sendorbit.sh --help
@@ -69,13 +70,13 @@ chmod 600 config/hosts.conf
 $ ./sendorbit.sh
 
 ╔════════════════════════════════════════════╗
-║              sendorbit v1.0.0              ║
+║              sendorbit v1.0.4              ║
 ╚════════════════════════════════════════════╝
 
 Available hosts:
  1. admin@1xx.1xx.1.1xx:22 -> /home/admin/backups
  2. deploy@prod-web:2222 -> /var/www/app
- 3. ops@duckpi.local -> /home/monkey/duckpi
+ 3. ops@duckpi.local:22 -> /home/ops/duckpi
 
 Host (1-3) or 'q' to quit: 2
 
@@ -98,6 +99,14 @@ Connecting to deploy@prod-web:2222...
 Connection closed successfully
 ```
 
+### Transferring files: interactive vs `--transfer`
+
+The interactive menu ("Send files (SCP)" / "Smart sync") asks for a **space-separated** list of filenames. Because that input is split on spaces, the TUI does **not** support filenames containing spaces: if the whole line you type names a single existing file that has spaces, sendorbit aborts with an error instead of silently transferring the name's parts. Use the non-interactive `--transfer` flag for such files:
+
+```bash
+./sendorbit.sh --transfer scp deploy prod-web 2222 /var/www/app "my file.txt"
+```
+
 ## hosts.conf format
 
 ```bash
@@ -113,13 +122,18 @@ Connection closed successfully
 ## Security
 
 - SSH configuration delegated entirely to `~/.ssh/config` (no hardcoded options that override user settings)
-- Hosts rejected if they contain shell metacharacters (`;&|<>`, `(){}`, `` ` ``, `$`, `!`, `[]`, `*`, `?`, `~`, newlines, tabs) or path traversal (`..`)
+- Hosts rejected if they contain shell metacharacters (`;&|<>`, `(){}`, `` ` ``, `$`, `!`, `'`, `[]`, `*`, `?`, `~`, newlines, tabs, carriage returns) or path traversal (`..`)
+- Ports validated (`1–65535`, digits only, no leading zeros), hostnames capped at 253 characters (RFC 1035, `validate_hostname`), and destinations checked against traversal/metacharacters at every entry point — TUI, CLI and modules
 - Transfers protected by anti-argument-injection delimiter `--`
+- Remote backup directory created via `%q`-quoted `mkdir -p`; transfer aborts if the backup cannot be prepared (no silent data loss)
 - Config parser extracts entries text-only (no `source`/`exec` of user-supplied data)
 - PATH sanitized to `/usr/local/bin:/usr/bin:/bin` before binary resolution
-- Lock file via `flock -n` over file descriptor (no TOCTOU/symlink attacks)
+- Lock file via `flock -n` over a file descriptor; the lockfile is never unlinked at exit (avoids flock-unlink races)
+- Logs written with `umask 077`; general log forced to `600` (contains usernames, hosts and paths)
 - Security log with 600 permissions, audit trail of all connection attempts
 - No eval, no dynamic source from user input
+
+See [SECURITY.md](SECURITY.md) for the full policy.
 
 ## SSH delegation model
 
@@ -138,6 +152,8 @@ Host prod-web
 
 Passphrase-protected keys work if loaded in `ssh-agent`. Without an agent, SSH will prompt interactively for the passphrase.
 
+**Command override scope:** `SSH_CMD` / `SCP_CMD` / `RSYNC_CMD` environment presets are honored only when invoking `modules/*.sh` directly. The main `./sendorbit.sh` entrypoint always resolves binaries from its sanitized PATH (`/usr/local/bin:/usr/bin:/bin`) and ignores those presets — intentional, so production runs never execute wrappers inherited from the ambient environment.
+
 ## Project structure
 
 ```
@@ -147,10 +163,11 @@ lib/validation.sh       → centralized validations (no source/exec)
 lib/logging.sh          → logging with rotation
 lib/security.sh         → input validation, security logging
 modules/connection.sh   → SSH connection
-modules/transfer.sh     → SCP/RSync with backup
+modules/transfer.sh     → SCP/RSync with native rsync backup
 config/                 → hosts.conf (gitignored)
-logs/                   → sendorbit.log, security.log (gitignored)
-tests/                  → bats unit tests (100 tests)
+logs/                   → sendorbit.log, security.log, lock file (gitignored)
+tests/                  → bats unit tests
+SECURITY.md             → reporting policy and security model
 ```
 
 ## Running tests
@@ -160,6 +177,9 @@ bats tests/validation_test.sh
 bats tests/security_test.sh
 bats tests/logging_test.sh
 bats tests/modules_test.sh
+bats tests/push_dir_test.sh
+bats tests/utils_test.sh
+bats tests/cli_test.sh
 ```
 
 Or run all suites at once:
@@ -168,7 +188,7 @@ Or run all suites at once:
 bats tests/*.sh
 ```
 
-CI runs `bash -n`, ShellCheck, and the full BATS suite on every push and PR.
+CI runs `bash -n`, ShellCheck, and the full BATS suite on push and PR to `main`.
 
 ## License
 
